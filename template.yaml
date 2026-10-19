@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31     # tells CloudFormation this is SAM shorthand
-Description: Job Scoring API (phase 2 - hello)
+Description: Job Scoring API (phase 3 - batches, auth, DynamoDB)
 
 Globals:
   Function:
@@ -10,6 +10,43 @@ Globals:
     Timeout: 10
 
 Resources:
+  # Explicit API so we can attach an authorizer and throttling.
+  # Replaces the implicit ServerlessHttpApi from phase 2 (new API ID, so the URL changes).
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
+      Auth:
+        DefaultAuthorizer: TokenAuthorizer
+        Authorizers:
+          TokenAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            AuthorizerPayloadFormatVersion: '2.0'
+            EnableSimpleResponses: true
+            Identity:
+              Headers: [Authorization]
+              ReauthorizeEvery: 300       # cache decisions per token for 5 minutes
+
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   HelloFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -17,11 +54,75 @@ Resources:
       Handler: app.handler                # file app.py, function handler
       Events:
         Hello:
-          Type: HttpApi                   # creates the API Gateway for us
+          Type: HttpApi
           Properties:
+            ApiId: !Ref HttpApi
             Path: /v1/hello               # versioned from day one
+            Method: GET
+            Auth:
+              Authorizer: NONE            # public health check
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/authorizer/
+      Handler: app.handler
+      Environment:
+        Variables:
+          TOKEN_PARAMETER: /job-scoring-api/api-token   # SecureString, created by hand
+      Policies:
+        - SSMParameterReadPolicy:
+            ParameterName: job-scoring-api/api-token   # template prepends "parameter/"
+
+  # SAM does not grant API Gateway permission to call a Lambda authorizer on HttpApi; do it here.
+  AuthorizerFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AuthorizerFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/authorizers/*"
+
+  SubmitBatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/batches/
+      Handler: submit.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref JobsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+      Events:
+        Score:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /v1/score
+            Method: POST
+
+  GetBatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/batches/
+      Handler: get_batch.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref JobsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref JobsTable
+      Events:
+        GetBatch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /v1/batches/{id}
             Method: GET
 
 Outputs:
   ApiUrl:
-    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  TableName:
+    Value: !Ref JobsTable

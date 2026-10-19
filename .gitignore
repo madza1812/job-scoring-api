@@ -2,3 +2,5 @@
 samconfig.toml.bak
 __pycache__/
 .aws-sam/
+.venv/
+.pytest_cache/
