@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31     # tells CloudFormation this is SAM shorthand
+Description: Job Scoring API (phase 2 - hello)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]                # Graviton: cheaper than x86
+    MemorySize: 256
+    Timeout: 10
+
+Resources:
+  HelloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/hello/
+      Handler: app.handler                # file app.py, function handler
+      Events:
+        Hello:
+          Type: HttpApi                   # creates the API Gateway for us
+          Properties:
+            Path: /v1/hello               # versioned from day one
+            Method: GET
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
